@@ -88,7 +88,7 @@
                                    (package-native-inputs base-rust))))))
 
 (define-public mrustc
-  (let ((rustc-version "1.19.0"))
+  (let ((rustc-version "1.29.0"))
     (package
       (name "mrustc")
       (version "0.9")
@@ -109,7 +109,7 @@
        `(("bison" ,bison)
          ("flex" ,flex)
          ;; Required for the libstd sources.
-         ("rustc" ,(package-source rust-1.19))))
+         ("rustc" ,(package-source rust-1.29))))
       (arguments
        `(#:test-target "local_tests"
          #:make-flags (list (string-append "LLVM_CONFIG="
@@ -133,8 +133,8 @@
                                  ,(or (%current-target-system)
                                       (nix-system->gnu-triplet-for-rust)))))
                (invoke "tar" "xf" (assoc-ref inputs "rustc"))
-               (chdir "rustc-1.19.0-src")
-               (invoke "patch" "-p0" "../rustc-1.19.0-src.patch")
+               (chdir "rustc-1.29.0-src")
+               (invoke "patch" "-p0" "../rustc-1.29.0-src.patch")
                (chdir "..")
                #t))
            (replace 'configure
@@ -178,19 +178,21 @@ safety and thread safety guarantees.")
       ;; Dual licensed.
       (license (list license:asl2.0 license:expat)))))
 
-(define rust-1.19
+(define rust-1.29
   (package
     (name "rust")
-    (version "1.19.0")
+    (version "1.29.0")
     (source
       (origin
         (method url-fetch)
-        (uri (rust-uri "1.19.0"))
-        (sha256 (base32 "0l8c14qsf42rmkqy92ahij4vf356dbyspxcips1aswpvad81y8qm"))
+        (uri (rust-uri "1.29.0"))
+        (sha256 (base32 "1sb15znckj8pc8q3g7cq03pijnida6cg64yqmgiayxkzskzk9sx4"))
         (modules '((guix build utils)))
         (snippet '(begin (delete-file-recursively "src/llvm") #t))
-        (patches (map search-patch '("rust-1.19-mrustc.patch")))))
-    (outputs '("out" "cargo"))
+        (patches (map search-patch '("rust-1.25-accept-more-detailed-gdb-lines.patch"
+                                     "rust-reproducible-builds.patch"
+                                     "rustc-1.29.0-src.patch")))))
+    (outputs '("out" "cargo" "doc"))
     (properties '((timeout . 72000)               ;20 hours
                   (max-silent-time . 18000)))     ;5 hours (for armel)
     (arguments
@@ -201,30 +203,13 @@ safety and thread safety guarantees.")
          (add-after 'unpack 'set-env
            (lambda* (#:key inputs #:allow-other-keys)
              ;; Disable test for cross compilation support.
+(write "X")
              (setenv "CFG_DISABLE_CROSS_TESTS" "1")
              (setenv "SHELL" (which "sh"))
              (setenv "CONFIG_SHELL" (which "sh"))
              (setenv "CC" (string-append (assoc-ref inputs "gcc") "/bin/gcc"))
              ;; guix llvm-3.9.1 package installs only shared libraries
              (setenv "LLVM_LINK_SHARED" "1")
-             #t))
-         (add-after 'unpack 'patch-cargo-tomls
-           (lambda* (#:key inputs outputs #:allow-other-keys)
-             (substitute* "src/librustc_errors/Cargo.toml"
-               (("[[]dependencies[]]") "
-[dependencies]
-term = \"0.4.4\"
-"))
-             (substitute* "src/librustc/Cargo.toml"
-               (("[[]dependencies[]]") "
-[dependencies]
-getopts = { path = \"../libgetopts\" }
-"))
-             (substitute* "src/librustdoc/Cargo.toml"
-               (("[[]dependencies[]]") "
-[dependencies]
-test = { path = \"../libtest\" }
-"))
              #t))
          (add-after 'unpack 'patch-tests
            (lambda* (#:key inputs #:allow-other-keys)
@@ -244,27 +229,29 @@ test = { path = \"../libtest\" }
     #[ignore]
     fn test_process_mask"))
                #t)))
+         (add-after 'patch-tests 'patch-cargo-index-update
+           (lambda* _
+             (substitute* "src/tools/cargo/tests/testsuite/generate_lockfile.rs"
+               ;; This test wants to update the crate index.
+               (("fn no_index_update") "#[ignore]\nfn no_index_update"))
+             #t))
          (add-after 'patch-tests 'patch-aarch64-test
            (lambda* _
-             (substitute* "src/librustc_back/dynamic_lib.rs"
+             (substitute* "src/librustc_metadata/dynamic_lib.rs"
                ;; This test is known to fail on aarch64 and powerpc64le:
                ;; https://github.com/rust-lang/rust/issues/45410
                (("fn test_loading_cosine") "#[ignore]\nfn test_loading_cosine"))
-             #t))
-         (add-after 'patch-tests 'use-readelf-for-tests
-           (lambda* _
-             ;; nm doesn't recognize the file format because of the
-             ;; nonstandard sections used by the Rust compiler, but readelf
-             ;; ignores them.
-             (substitute* "src/test/run-make/atomic-lock-free/Makefile"
-               (("\tnm ")
-                "\treadelf -c "))
+             ;; This test fails on aarch64 with llvm@6.0:
+             ;; https://github.com/rust-lang/rust/issues/49807
+             ;; other possible solution:
+             ;; https://github.com/rust-lang/rust/pull/47688
+             (delete-file "src/test/debuginfo/by-value-self-argument-in-trait-impl.rs")
              #t))
          (add-after 'patch-tests 'remove-unsupported-tests
            (lambda* _
              ;; Our ld-wrapper cannot process non-UTF8 bytes in LIBRARY_PATH.
              ;; <https://lists.gnu.org/archive/html/guix-devel/2017-06/msg00193.html>
-             (delete-file-recursively "src/test/run-make/linker-output-non-utf8")
+             (delete-file-recursively "src/test/run-make-fulldeps/linker-output-non-utf8")
              #t))
          (add-after 'patch-source-shebangs 'patch-cargo-checksums
            (lambda* _
@@ -284,19 +271,28 @@ test = { path = \"../libtest\" }
              #t))
          ;; This phase is overridden by newer versions.
          (replace 'configure
-           (const #t))
+           (lambda* (#:key inputs outputs #:allow-other-keys)
+             (setenv "CXX" "g++")
+             (setenv "HOST_CXX" "g++")
+             #t))
          ;; This phase is overridden by newer versions.
          (replace 'build
            (lambda* (#:key inputs outputs #:allow-other-keys)
              (let ((rustc-bootstrap (assoc-ref inputs "rustc-bootstrap")))
+;(invoke "ls" "src/vendor/getopts")
+;(newline)
                (setenv "CFG_COMPILER_HOST_TRIPLE"
                 ,(nix-system->gnu-triplet (%current-system)))
                (setenv "CFG_RELEASE" "")
                (setenv "CFG_RELEASE_CHANNEL" "stable")
                (setenv "CFG_LIBDIR_RELATIVE" "lib")
-               (setenv "CFG_VERSION" "1.19.0-stable-mrustc")
+               (setenv "CFG_VERSION" "1.29.0-stable-mrustc")
                ; bad: (setenv "CFG_PREFIX" "mrustc") ; FIXME output path.
-               (mkdir-p "output")
+               ;; Crate::load_extern_crate ignores the search path, so make
+               ;; the situation easier for it.
+               (copy-recursively (string-append rustc-bootstrap "/lib/mrust")
+                                 "output")
+               ;(mkdir-p "output")
                (invoke (string-append rustc-bootstrap "/tools/bin/minicargo")
                        "src/rustc" "--vendor-dir" "src/vendor"
                        "--output-dir" "output/rustc-build"
@@ -311,7 +307,7 @@ test = { path = \"../libtest\" }
                (invoke (string-append rustc-bootstrap "/tools/bin/minicargo")
                        "src/tools/cargo" "--vendor-dir" "src/vendor"
                        "--output-dir" "output/cargo-build"
-                       "-L" "output/"
+                       ;"-L" "output/"
                        "-L" (string-append rustc-bootstrap "/lib/mrust")
                        "-j" "1")
                ;; Now use the newly-built rustc to build the libraries.
@@ -396,7 +392,7 @@ test = { path = \"../libtest\" }
        ("which" ,which)))
     (inputs
      `(("jemalloc" ,jemalloc-4.5.0)
-       ("llvm" ,llvm-3.9.1)
+       ("llvm" ,llvm-6)
        ("openssl" ,openssl-1.0)
        ("libssh2" ,libssh2) ; For "cargo"
        ("libcurl" ,curl)))  ; For "cargo"
@@ -419,10 +415,10 @@ safety and thread safety guarantees.")
     ;; Dual licensed.
     (license (list license:asl2.0 license:expat))))
 
-(define-public rust-1.20
+(define-public rust-1.30
   (let ((base-rust
-         (rust-bootstrapped-package rust-1.19 "1.20.0"
-          "0542y4rnzlsrricai130mqyxl8r6rd991frb4qsnwb27yigqg91a")))
+         (rust-bootstrapped-package rust-1.29 "1.30.1"
+          "0aavdc1lqv0cjzbqwl5n59yd0bqdlhn0zas61ljf38yrvc18k8rn")))
     (package
       (inherit base-rust)
       (source
@@ -431,20 +427,45 @@ safety and thread safety guarantees.")
           (snippet '(begin
                       (delete-file-recursively "src/jemalloc")
                       (delete-file-recursively "src/llvm")
+                      (delete-file-recursively "src/llvm-emscripten")
+                      (delete-file-recursively "src/tools/clang")
+                      (delete-file-recursively "src/tools/lldb")
                       #t))
           (patches '())))
       (outputs '("out" "doc" "cargo"))
-      ;; Since rust-1.19 is local, it's quite probable that Hydra
-      ;; will build rust-1.19 only as a dependency of rust-1.20.
+      ;; Since rust-2.19 is local, it's quite probable that Hydra
+      ;; will build rust-1.29 only as a dependency of rust-1.20.
       ;; But then Hydra will use the wrong properties, the ones here,
-      ;; for rust-1.19.  Therefore, we copied the properties of
-      ;; rust-1.19 here.
+      ;; for rust-1.29.  Therefore, we copied the properties of
+      ;; rust-1.29 here.
       (properties '((timeout . 72000)               ;20 hours
                     (max-silent-time . 18000)))     ;5 hours (for armel)
+      (inputs
+       ;; Use LLVM 6.0
+       (alist-replace "llvm" (list llvm-6)
+                      (package-inputs base-rust)))
       (arguments
-       (substitute-keyword-arguments (package-arguments rust-1.19)
+       (substitute-keyword-arguments (package-arguments rust-1.29)
          ((#:phases phases)
           `(modify-phases ,phases
+             (add-after 'unpack 'remove-flaky-test
+               (lambda _
+                 ;; See <https://github.com/rust-lang/rust/issues/43402>.
+                 (when (file-exists? "src/test/run-make/issue-26092")
+                   (delete-file-recursively "src/test/run-make/issue-26092"))
+                 #t))
+             (add-after 'configure 'enable-codegen-tests
+               ;; Codegen tests should pass with llvm 6, so enable them.
+               (lambda* _
+                 (substitute* "config.toml"
+                   (("codegen-tests = false") ""))
+                 #t))
+              ;; The test has been moved elsewhere.
+              (add-after 'patch-tests 'disable-amd64-avx-test
+                (lambda _
+                  (substitute* "src/test/ui/issues/issue-44056.rs"
+                   (("only-x86_64") "ignore-test"))
+                  #t))
              (add-after 'patch-tests 'patch-cargo-tests
                (lambda _
                  (substitute* "src/tools/cargo/tests/build.rs"
@@ -466,12 +487,29 @@ safety and thread safety guarantees.")
                    (("fn finds_author_git") "#[ignore]\nfn finds_author_git")
                    (("fn finds_local_author_git") "#[ignore]\nfn finds_local_author_git"))
                  #t))
-             (add-after 'patch-cargo-tests 'ignore-glibc-2.27-incompatible-test
-               ;; https://github.com/rust-lang/rust/issues/47863
-               (lambda _
-                 (substitute* "src/test/run-pass/out-of-stack.rs"
-                   (("// ignore-android") "// ignore-test\n// ignore-android"))
-                 #t))
+             (add-after 'patch-cargo-tests 'patch-cargo-env-shebang
+               (lambda* (#:key inputs #:allow-other-keys)
+                 (let ((coreutils (assoc-ref inputs "coreutils")))
+                   (substitute* "src/tools/cargo/tests/testsuite/fix.rs"
+                     ;; Cargo has a test which explicitly sets a
+                     ;; RUSTC_WRAPPER environment variable which points
+                     ;; to /usr/bin/env. Since it's not a shebang, it
+                     ;; needs to be manually patched
+                     (("\"/usr/bin/env\"")
+                      (string-append "\"" coreutils "/bin/env\"")))
+                   #t)))
+             (add-after 'patch-cargo-env-shebang 'ignore-cargo-package-tests
+               (lambda* _
+                 (substitute* "src/tools/cargo/tests/testsuite/package.rs"
+                   ;; These tests largely check that cargo outputs warning/error
+                   ;; messages as expected. It seems that cargo outputs an
+                   ;; absolute path to something in the store instead of the
+                   ;; expected relative path (e.g. `[..]`) so we'll ignore
+                   ;; these for now
+                   (("fn include") "#[ignore]\nfn include")
+                   (("fn exclude") "#[ignore]\nfn exclude"))
+                   #t))
+
              (replace 'configure
                (lambda* (#:key inputs outputs #:allow-other-keys)
                  (let* ((out (assoc-ref outputs "out"))
@@ -523,16 +561,6 @@ jemalloc = \"" jemalloc "/lib/libjemalloc_pic.a" "\"
                           "/tmp/cc")
                  (setenv "PATH" (string-append "/tmp:" (getenv "PATH")))
                  #t))
-             (add-after 'provide-cc 'configure-archiver
-               (lambda* (#:key inputs #:allow-other-keys)
-                 (substitute* "src/build_helper/lib.rs"
-                  ;; Make sure "ar" is always used as the archiver.
-                  (("\"musl\"") "\"\"")
-                  ;; Then substitute "ar" by our name.
-                  (("\"ar\"") (string-append "\""
-                               (assoc-ref inputs "binutils")
-                               "/bin/ar\"")))
-                 #t))
              (delete 'patch-cargo-tomls)
              (add-before 'build 'reset-timestamps-after-changes
                (lambda* _
@@ -549,11 +577,14 @@ jemalloc = \"" jemalloc "/lib/libjemalloc_pic.a" "\"
                  (invoke "./x.py" "build" "src/tools/cargo")))
              (replace 'check
                (lambda* _
-                 ;; Disable parallel execution to prevent EAGAIN errors when
-                 ;; running tests.
-                 (invoke "./x.py" "-j1" "test" "-vv")
-                 (invoke "./x.py" "-j1" "test" "src/tools/cargo")
-                 #t))
+                 ;; Enable parallel execution.
+                 (let ((parallel-job-spec
+                        (string-append "-j" (number->string
+                                             (min 4
+                                                  (parallel-job-count))))))
+                   (invoke "./x.py" parallel-job-spec "test" "-vv")
+                   (invoke "./x.py" parallel-job-spec "test"
+                           "src/tools/cargo"))))
              (replace 'install
                (lambda* (#:key outputs #:allow-other-keys)
                  (invoke "./x.py" "install")
@@ -591,315 +622,6 @@ jemalloc = \"" jemalloc "/lib/libjemalloc_pic.a" "\"
                      `("LIBRARY_PATH" ":" suffix (,(string-append libc "/lib"))))
                    #t))))))))))
 
-(define-public rust-1.21
-  (let ((base-rust (rust-bootstrapped-package rust-1.20 "1.21.0"
-                    "1yj8lnxybjrybp00fqhxw8fpr641dh8wcn9mk44xjnsb4i1c21qp")))
-    (package
-      (inherit base-rust)
-      (arguments
-       (substitute-keyword-arguments (package-arguments base-rust)
-         ((#:phases phases)
-          `(modify-phases ,phases
-             (add-after 'configure 'remove-ar
-               (lambda* (#:key inputs #:allow-other-keys)
-                 ;; Remove because toml complains about "unknown field".
-                 (substitute* "config.toml"
-                  (("^ar =.*") "\n"))
-                 #t)))))))))
-
-(define-public rust-1.22
-  (let ((base-rust (rust-bootstrapped-package rust-1.21 "1.22.1"
-                    "1lrzzp0nh7s61wgfs2h6ilaqi6iq89f1pd1yaf65l87bssyl4ylb")))
-    (package
-      (inherit base-rust)
-      (arguments
-       (substitute-keyword-arguments (package-arguments base-rust)
-         ((#:phases phases)
-          `(modify-phases ,phases
-             (add-after 'unpack 'remove-flaky-test
-               (lambda _
-                 ;; See <https://github.com/rust-lang/rust/issues/43402>.
-                 (when (file-exists? "src/test/run-make/issue-26092")
-                   (delete-file-recursively "src/test/run-make/issue-26092"))
-                 #t)))))))))
-
-(define-public rust-1.23
-  (let ((base-rust (rust-bootstrapped-package rust-1.22 "1.23.0"
-                    "14fb8vhjzsxlbi6yrn1r6fl5dlbdd1m92dn5zj5gmzfwf4w9ar3l")))
-    (package
-      (inherit base-rust)
-      (arguments
-       (substitute-keyword-arguments (package-arguments base-rust)
-         ((#:phases phases)
-          `(modify-phases ,phases
-             (delete 'configure-archiver)
-             (delete 'remove-ar)
-             (add-after 'unpack 'dont-build-native
-               (lambda _
-                 ;; XXX: Revisit this when we use gcc 6.
-                 (substitute* "src/binaryen/CMakeLists.txt"
-                  (("ADD_COMPILE_FLAG\\(\\\"-march=native\\\"\\)") ""))
-                 #t)))))))))
-
-(define-public rust-1.24
-  (let ((base-rust
-         (rust-bootstrapped-package rust-1.23 "1.24.1"
-          "1vv10x2h9kq7fxh2v01damdq8pvlp5acyh1kzcda9sfjx12kv99y")))
-    (package
-      (inherit base-rust)
-      (arguments
-       (substitute-keyword-arguments (package-arguments base-rust)
-         ((#:phases phases)
-          `(modify-phases ,phases
-             (delete 'use-readelf-for-tests)
-             (replace 'patch-aarch64-test
-               (lambda* _
-                 (substitute* "src/librustc_metadata/dynamic_lib.rs"
-                   ;; This test is known to fail on aarch64 and powerpc64le:
-                   ;; https://github.com/rust-lang/rust/issues/45410
-                   (("fn test_loading_cosine") "#[ignore]\nfn test_loading_cosine"))
-                 #t)))))))))
-
-;;; Rust 1.25 release support work with llvm 6--but build with llvm 6 is
-;;; not determenistic due to <https://github.com/rust-lang/rust/issues/50556>.
-;;; Keep using llvm 3.9.1 until builds become determenistic
-(define-public rust-1.25
-  (let ((base-rust
-         (rust-bootstrapped-package rust-1.24 "1.25.0"
-          "0baxjr99311lvwdq0s38bipbnj72pn6fgbk6lcq7j555xq53mxpf")))
-    (package
-      (inherit base-rust)
-      (source
-        (origin
-          (inherit (package-source base-rust))
-          (snippet '(begin
-                      (delete-file-recursively "src/jemalloc")
-                      (delete-file-recursively "src/llvm")
-                      (delete-file-recursively "src/llvm-emscripten")
-                      #t))
-          (patches (map search-patch
-                        '("rust-1.25-accept-more-detailed-gdb-lines.patch")))))
-      (arguments
-       (substitute-keyword-arguments (package-arguments base-rust)
-         ((#:phases phases)
-          `(modify-phases ,phases
-             (add-after 'patch-cargo-tests 'patch-cargo-index-update
-               (lambda _
-                 (substitute* "src/tools/cargo/tests/generate-lockfile.rs"
-                   ;; This test wants to update the crate index.
-                   (("fn no_index_update") "#[ignore]\nfn no_index_update"))
-                 #t))
-             (replace 'patch-aarch64-test
-               (lambda _
-                 (substitute* "src/librustc_metadata/dynamic_lib.rs"
-                   ;; This test is known to fail on aarch64 and powerpc64le:
-                   ;; https://github.com/rust-lang/rust/issues/45410
-                   (("fn test_loading_cosine") "#[ignore]\nfn test_loading_cosine"))
-                 ;; This test fails on aarch64 with llvm@6.0:
-                 ;; https://github.com/rust-lang/rust/issues/49807
-                 ;; other possible solution:
-                 ;; https://github.com/rust-lang/rust/pull/47688
-                 (delete-file "src/test/debuginfo/by-value-self-argument-in-trait-impl.rs")
-                 #t))
-             (delete 'ignore-glibc-2.27-incompatible-test))))))))
-
-(define-public rust-1.26
-  (let ((base-rust
-         (rust-bootstrapped-package rust-1.25 "1.26.2"
-          "0047ais0fvmqvngqkdsxgrzhb0kljg8wy85b01kbbjc88hqcz7pv")))
-    (package
-      (inherit base-rust)
-      (source
-        (origin
-          (inherit (package-source base-rust))
-          (patches (map search-patch
-                        '("rust-coresimd-doctest.patch"
-                          "rust-1.25-accept-more-detailed-gdb-lines.patch")))))
-      (arguments
-       (substitute-keyword-arguments (package-arguments base-rust)
-         ((#:phases phases)
-          `(modify-phases ,phases
-             ;; binaryen was replaced with LLD project from LLVM
-             (delete 'dont-build-native)
-             (replace 'check
-               (lambda* _
-                 ;; Enable parallel execution.
-                 (let ((parallel-job-spec
-                        (string-append "-j" (number->string
-                                             (min 4
-                                                  (parallel-job-count))))))
-                   (invoke "./x.py" parallel-job-spec "test" "-vv")
-                   (invoke "./x.py" parallel-job-spec "test"
-                           "src/tools/cargo"))))
-             (replace 'remove-unsupported-tests
-               (lambda* _
-                 ;; Our ld-wrapper cannot process non-UTF8 bytes in LIBRARY_PATH.
-                 ;; <https://lists.gnu.org/archive/html/guix-devel/2017-06/msg00193.html>
-                 (delete-file-recursively "src/test/run-make-fulldeps/linker-output-non-utf8")
-                 #t))
-             (replace 'patch-cargo-tests
-               (lambda* _
-                 (substitute* "src/tools/cargo/tests/testsuite/build.rs"
-                   (("/usr/bin/env") (which "env"))
-                   ;; Guix llvm is compiled without asmjs-unknown-emscripten.
-                   (("fn wasm32_final_outputs") "#[ignore]\nfn wasm32_final_outputs"))
-                 (substitute* "src/tools/cargo/tests/testsuite/death.rs"
-                   ;; This is stuck when built in container.
-                   (("fn ctrl_c_kills_everyone") "#[ignore]\nfn ctrl_c_kills_everyone"))
-                 ;; Prints test output in the wrong order when built on
-                 ;; i686-linux.
-                 (substitute* "src/tools/cargo/tests/testsuite/test.rs"
-                   (("fn cargo_test_env") "#[ignore]\nfn cargo_test_env"))
-
-                 ;; Avoid dependency on "git".
-                 (substitute* "src/tools/cargo/tests/testsuite/new.rs"
-                   (("fn author_prefers_cargo") "#[ignore]\nfn author_prefers_cargo")
-                   (("fn finds_author_git") "#[ignore]\nfn finds_author_git")
-                   (("fn finds_local_author_git") "#[ignore]\nfn finds_local_author_git"))
-                 #t))
-             (add-after 'patch-cargo-tests 'disable-cargo-test-for-nightly-channel
-               (lambda* _
-                 ;; This test failed to work on "nightly" channel builds
-                 ;; https://github.com/rust-lang/cargo/issues/5648
-                 (substitute* "src/tools/cargo/tests/testsuite/resolve.rs"
-                   (("fn test_resolving_minimum_version_with_transitive_deps")
-                    "#[ignore]\nfn test_resolving_minimum_version_with_transitive_deps"))
-                 #t))
-             (replace 'patch-cargo-index-update
-               (lambda* _
-                 (substitute* "src/tools/cargo/tests/testsuite/generate_lockfile.rs"
-                   ;; This test wants to update the crate index.
-                   (("fn no_index_update") "#[ignore]\nfn no_index_update"))
-                 #t)))))))))
-
-(define-public rust-1.27
-  (let ((base-rust
-         (rust-bootstrapped-package rust-1.26 "1.27.2"
-          "0pg1s37bhx9zqbynxyydq5j6q7kij9vxkcv8maz0m25prm88r0cs")))
-    (package
-      (inherit base-rust)
-      (source
-        (origin
-          (inherit (package-source base-rust))
-          (patches (map search-patch '("rust-coresimd-doctest.patch"
-                                       "rust-bootstrap-stage0-test.patch"
-                                       "rust-1.25-accept-more-detailed-gdb-lines.patch"
-                                       "rust-reproducible-builds.patch")))))
-      (arguments
-       (substitute-keyword-arguments (package-arguments base-rust)
-         ((#:phases phases)
-          `(modify-phases ,phases
-             (add-before 'install 'mkdir-prefix-paths
-               (lambda* (#:key outputs #:allow-other-keys)
-                 ;; As result of https://github.com/rust-lang/rust/issues/36989
-                 ;; `prefix' directory should exist before `install' call
-                 (mkdir-p (assoc-ref outputs "out"))
-                 (mkdir-p (assoc-ref outputs "cargo"))
-                 #t))
-             (add-after 'patch-cargo-tests 'disable-thinlto-test
-               (lambda* _
-                 ;; thinlto required llvm 6.0 for work
-                 (substitute* "src/tools/cargo/tests/testsuite/path.rs"
-                   (("fn thin_lto_works") "#[ignore]\nfn thin_lto_works"))
-                 #t)))))))))
-
-(define-public rust-1.28
-  (let ((base-rust
-         (rust-bootstrapped-package rust-1.27 "1.28.0"
-          "11k4rn77bca2rikykkk9fmprrgjswd4x4kaq7fia08vgkir82nhx")))
-    (package
-      (inherit base-rust)
-      (source
-        (origin
-          (inherit (package-source base-rust))
-          (patches (map search-patch '("rust-coresimd-doctest.patch"
-                                       "rust-bootstrap-stage0-test.patch"
-                                       "rust-1.25-accept-more-detailed-gdb-lines.patch"
-                                       "rust-reproducible-builds.patch")))))
-      (inputs
-       ;; Use LLVM 6.0
-       (alist-replace "llvm" (list llvm-6)
-                      (package-inputs base-rust)))
-      (arguments
-       (substitute-keyword-arguments (package-arguments base-rust)
-         ((#:phases phases)
-          `(modify-phases ,phases
-             (add-after 'configure 'enable-codegen-tests
-               ;; Codegen tests should pass with llvm 6, so enable them.
-               (lambda* _
-                 (substitute* "config.toml"
-                   (("codegen-tests = false") ""))
-                 #t))
-             (add-after 'patch-tests 'disable-amd64-avx-test
-               ;; That test would fail on x86_64 machines without avx.
-               (lambda* _
-                 (substitute* "src/test/run-pass/issue-44056.rs"
-                   (("only-x86_64") "ignore-test"))
-                 #t))
-             ;; The thinlto test should pass with llvm 6.
-             (delete 'disable-thinlto-test))))))))
-
-(define-public rust-1.29
-  (let ((base-rust
-         (rust-bootstrapped-package rust-1.28 "1.29.2"
-          "1jb787080z754caa2w3w1amsygs4qlzj9rs1vy64firfmabfg22h")))
-    (package
-      (inherit base-rust)
-      (source
-        (origin
-          (inherit (package-source base-rust))
-          (patches (map search-patch '("rust-1.25-accept-more-detailed-gdb-lines.patch"
-                                       "rust-reproducible-builds.patch"))))))))
-
-(define-public rust-1.30
-  (let ((base-rust
-         (rust-bootstrapped-package rust-1.29 "1.30.1"
-          "0aavdc1lqv0cjzbqwl5n59yd0bqdlhn0zas61ljf38yrvc18k8rn")))
-    (package
-      (inherit base-rust)
-      (source
-        (origin
-          (inherit (package-source base-rust))
-          (snippet '(begin
-                      (delete-file-recursively "src/jemalloc")
-                      (delete-file-recursively "src/llvm")
-                      (delete-file-recursively "src/llvm-emscripten")
-                      (delete-file-recursively "src/tools/clang")
-                      (delete-file-recursively "src/tools/lldb")
-                      #t))))
-      (arguments
-       (substitute-keyword-arguments (package-arguments base-rust)
-         ((#:phases phases)
-          `(modify-phases ,phases
-             (add-after 'patch-cargo-tests 'patch-cargo-env-shebang
-               (lambda* (#:key inputs #:allow-other-keys)
-                 (let ((coreutils (assoc-ref inputs "coreutils")))
-                   (substitute* "src/tools/cargo/tests/testsuite/fix.rs"
-                     ;; Cargo has a test which explicitly sets a
-                     ;; RUSTC_WRAPPER environment variable which points
-                     ;; to /usr/bin/env. Since it's not a shebang, it
-                     ;; needs to be manually patched
-                     (("\"/usr/bin/env\"")
-                      (string-append "\"" coreutils "/bin/env\"")))
-                   #t)))
-             (add-after 'patch-cargo-env-shebang 'ignore-cargo-package-tests
-               (lambda* _
-                 (substitute* "src/tools/cargo/tests/testsuite/package.rs"
-                   ;; These tests largely check that cargo outputs warning/error
-                   ;; messages as expected. It seems that cargo outputs an
-                   ;; absolute path to something in the store instead of the
-                   ;; expected relative path (e.g. `[..]`) so we'll ignore
-                   ;; these for now
-                   (("fn include") "#[ignore]\nfn include")
-                   (("fn exclude") "#[ignore]\nfn exclude"))
-                   #t))
-             ;; The test has been moved elsewhere.
-             (replace 'disable-amd64-avx-test
-               (lambda _
-                 (substitute* "src/test/ui/run-pass/issues/issue-44056.rs"
-	          (("only-x86_64") "ignore-test"))
-                  #t)))))))))
-
 (define-public rust-1.31
   (let ((base-rust
          (rust-bootstrapped-package rust-1.30 "1.31.1"
@@ -925,10 +647,10 @@ jemalloc = \"" jemalloc "/lib/libjemalloc_pic.a" "\"
                      ((" Command::new\\(\"echo\"\\)")
                       (string-append "\nCommand::new(\"" coreutils "/bin/echo\")\n")))
                    #t)))
-	      ;; The test has been moved elsewhere.
-	      (replace 'disable-amd64-avx-test
-	        (lambda _
-	          (substitute* "src/test/ui/issues/issue-44056.rs"
+	     ;; The test has been moved elsewhere.
+             (replace 'disable-amd64-avx-test
+               (lambda _
+                 (substitute* "src/test/ui/issues/issue-44056.rs"
                    (("only-x86_64") "ignore-test"))
                   #t))
              (add-after 'patch-tests 'patch-process-docs-rev-cmd
