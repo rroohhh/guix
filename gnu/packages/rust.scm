@@ -91,7 +91,7 @@
   (let ((rustc-version "1.19.0"))
     (package
       (name "mrustc")
-      (version "0.8.0")
+      (version "0.9")
       (source (origin
                 (method git-fetch)
                 (uri (git-reference
@@ -100,9 +100,7 @@
                 (file-name (git-file-name name version))
                 (sha256
                  (base32
-                  "0a7v8ccyzp1sdkwni8h1698hxpfz2sxhcpx42n6l2pbm0rbjp08i"))
-                (patches
-                 (search-patches "mrustc-0.8.0-fix-variable-length-integer-receiving.patch"))))
+                  "194ny7vsks5ygiw7d8yxjmp1qwigd71ilchis6xjl6bb2sj97rd2"))))
       (outputs '("out" "cargo"))
       (build-system gnu-build-system)
       (inputs
@@ -136,7 +134,7 @@
                                       (nix-system->gnu-triplet-for-rust)))))
                (invoke "tar" "xf" (assoc-ref inputs "rustc"))
                (chdir "rustc-1.19.0-src")
-               (invoke "patch" "-p0" "../rust_src.patch")
+               (invoke "patch" "-p0" "../rustc-1.19.0-src.patch")
                (chdir "..")
                #t))
            (replace 'configure
@@ -147,8 +145,8 @@
              (lambda _
                (for-each (lambda (target)
                            (invoke "make" "-f" "minicargo.mk" target))
-                         '("output/libstd.hir" "output/libpanic_unwind.hir"
-                           "output/libproc_macro.hir" "output/libtest.hir"))
+                         '("output/libstd.rlib" "output/libpanic_unwind.rlib"
+                           "output/libproc_macro.rlib" "output/libtest.rlib"))
                ;; Technically the above already does it - but we want to be clear.
                (invoke "make" "-C" "tools/minicargo")))
            (replace 'install
